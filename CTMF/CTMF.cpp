@@ -52,7 +52,7 @@ struct CTMFData {
 };
 
 template<int num>
-struct ALIGN Histogram{
+struct ALIGN Histogram {
     uint16_t coarse[num];
     uint16_t fine[num][num];
 };
