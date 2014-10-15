@@ -34,8 +34,8 @@
 */
 
 #include <cmath>
-#include "VapourSynth.h"
-#include "VSHelper.h"
+#include <vapoursynth/VapourSynth.h>
+#include <vapoursynth/VSHelper.h>
 
 #ifdef _MSC_VER
 #define ALIGN __declspec(align(32))
