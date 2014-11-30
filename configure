@@ -16,7 +16,7 @@ options:
   --install=PATH           set dir for install library
                            [/usr/local/lib/vapoursynth]
 
-  --clang, --gcc           compile by g++ or clang++ [clang]
+  --clang, --gcc           compile by g++ or clang++ [gcc]
   --target-os=OS           build programs to run on OS [auto]
   --cross-prefix=PREFIX    use PREFIX for compilation tools
   --sysroot=SYSROOT        root of cross-build tree
@@ -79,8 +79,8 @@ TARGET_OS=""
 CROSS=""
 
 SYSROOT=""
-CXX="clang++"
-LD="clang++"
+CXX="g++"
+LD="g++"
 STRIP="strip"
 
 test -n "$(which $CXX 2> /dev/null)" || CXX="g++"
