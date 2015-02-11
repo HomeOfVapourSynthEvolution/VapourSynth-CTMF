@@ -1,5 +1,5 @@
 #----------------------------------------------------------------------------
-#  Makefile for VapourSynth-CTMF, modified based on d2vsource/GNUmakefile
+#  Makefile for VapourSynth-CTMF
 #----------------------------------------------------------------------------
 
 include config.mak
