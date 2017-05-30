@@ -10,7 +10,7 @@ Usage
 
     ctmf.CTMF(clip clip[, int radius=2, int memsize=1048576, int opt=0, int[] planes])
 
-* clip: Clip to process. Any planar format with integer sample type of 8-16 bit depth is supported.
+* clip: Clip to process. Any planar format with integer sample type of 8, 10, 12, 14 and 16 bit depth is supported.
 
 * radius: Median filter radius. The kernel will be a 2\*radius+1 by 2\*radius+1 square. The maximum value is 127.
 
