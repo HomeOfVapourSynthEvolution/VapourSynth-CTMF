@@ -33,47 +33,37 @@
  *  perreaul@gel.ulaval.ca
  */
 
-#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <string>
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include "CTMF.hpp"
 
-struct CTMFData {
-    VSNodeRef * node;
-    const VSVideoInfo * vi;
-    int radius, memsize;
-    bool process[3];
-    uint16_t bins, shiftRight, modulo, t;
-    int stripeSize[3];
-};
+#ifdef VS_TARGET_CPU_X86
+template<typename T, uint16_t bins> extern void process_sse2(const T *, T *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
+template<typename T, uint16_t bins> extern void process_avx2(const T *, T *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
+#endif
 
-template<uint16_t bins>
-struct alignas(32) Histogram {
-    uint16_t coarse[bins];
-    uint16_t fine[bins][bins];
-};
+template<typename T, uint16_t bins> static void (*process)(const T *, T *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) = nullptr;
 
-static inline void histogramAdd(const uint16_t * x, uint16_t * VS_RESTRICT y, const uint16_t bins) noexcept {
+static inline void histogramAdd_c(const uint16_t * x, uint16_t * VS_RESTRICT y, const uint16_t bins) noexcept {
     for (uint16_t i = 0; i < bins; i++)
         y[i] += x[i];
 }
 
-static inline void histogramSub(const uint16_t * x, uint16_t * VS_RESTRICT y, const uint16_t bins) noexcept {
+static inline void histogramSub_c(const uint16_t * x, uint16_t * VS_RESTRICT y, const uint16_t bins) noexcept {
     for (uint16_t i = 0; i < bins; i++)
         y[i] -= x[i];
 }
 
-static inline void histogramMulAdd(const uint16_t a, const uint16_t * x, uint16_t * VS_RESTRICT y, const uint16_t bins) noexcept {
+static inline void histogramMulAdd_c(const uint16_t a, const uint16_t * x, uint16_t * VS_RESTRICT y, const uint16_t bins) noexcept {
     for (uint16_t i = 0; i < bins; i++)
         y[i] += a * x[i];
 }
 
 template<typename T, uint16_t bins>
-static void process(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRICT hCoarse, uint16_t * VS_RESTRICT hFine, const CTMFData * d,
-                    const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept {
+static void process_c(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRICT hCoarse, uint16_t * VS_RESTRICT hFine, const CTMFData * d,
+                      const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept {
     const T * p, * q;
 
     Histogram<bins> H;
@@ -116,17 +106,17 @@ static void process(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRICT
         memset(&H, 0, sizeof(H));
         memset(luc, 0, sizeof(luc));
         if (padLeft)
-            histogramMulAdd(d->radius, &hCoarse[0], H.coarse, bins);
+            histogramMulAdd_c(d->radius, &hCoarse[0], H.coarse, bins);
         for (int j = 0; j < (padLeft ? d->radius : 2 * d->radius); j++)
-            histogramAdd(&hCoarse[bins * j], H.coarse, bins);
+            histogramAdd_c(&hCoarse[bins * j], H.coarse, bins);
         for (int k = 0; k < bins; k++)
-            histogramMulAdd(2 * d->radius + 1, &hFine[bins * width * k], &H.fine[k][0], bins);
+            histogramMulAdd_c(2 * d->radius + 1, &hFine[bins * width * k], &H.fine[k][0], bins);
 
         for (int j = padLeft ? 0 : d->radius; j < (padRight ? width : width - d->radius); j++) {
             uint16_t sum = 0, * segment;
             int k, b;
 
-            histogramAdd(&hCoarse[bins * std::min(j + d->radius, width - 1)], H.coarse, bins);
+            histogramAdd_c(&hCoarse[bins * std::min(j + d->radius, width - 1)], H.coarse, bins);
 
             // Find median at coarse level
             for (k = 0; k < bins; k++) {
@@ -136,25 +126,25 @@ static void process(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRICT
                     break;
                 }
             }
-            assert(k < 16);
+            assert(k < bins);
 
             // Update corresponding histogram segment
             if (luc[k] <= j - d->radius) {
                 memset(&H.fine[k], 0, bins * sizeof(uint16_t));
                 for (luc[k] = j - d->radius; luc[k] < std::min(j + d->radius + 1, width); luc[k]++)
-                    histogramAdd(&hFine[bins * (width * k + luc[k])], H.fine[k], bins);
+                    histogramAdd_c(&hFine[bins * (width * k + luc[k])], H.fine[k], bins);
                 if (luc[k] < j + d->radius + 1) {
-                    histogramMulAdd(j + d->radius + 1 - width, &hFine[bins * (width * k + width - 1)], &H.fine[k][0], bins);
+                    histogramMulAdd_c(j + d->radius + 1 - width, &hFine[bins * (width * k + width - 1)], &H.fine[k][0], bins);
                     luc[k] = j + d->radius + 1;
                 }
             } else {
                 for (; luc[k] < j + d->radius + 1; luc[k]++) {
-                    histogramSub(&hFine[bins * (width * k + std::max(luc[k] - 2 * d->radius - 1, 0))], H.fine[k], bins);
-                    histogramAdd(&hFine[bins * (width * k + std::min(static_cast<int>(luc[k]), width - 1))], H.fine[k], bins);
+                    histogramSub_c(&hFine[bins * (width * k + std::max(luc[k] - 2 * d->radius - 1, 0))], H.fine[k], bins);
+                    histogramAdd_c(&hFine[bins * (width * k + std::min(static_cast<int>(luc[k]), width - 1))], H.fine[k], bins);
                 }
             }
 
-            histogramSub(&hCoarse[bins * std::max(j - d->radius, 0)], H.coarse, bins);
+            histogramSub_c(&hCoarse[bins * std::max(j - d->radius, 0)], H.coarse, bins);
 
             // Find median in segment
             segment = H.fine[k];
@@ -165,9 +155,34 @@ static void process(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRICT
                     break;
                 }
             }
-            assert(b < 16);
+            assert(b < bins);
         }
     }
+}
+
+static void selectFunctions(const unsigned opt) noexcept {
+    process<uint8_t, 16> = process_c<uint8_t, 16>;
+    process<uint16_t, 32> = process_c<uint16_t, 32>;
+    process<uint16_t, 64> = process_c<uint16_t, 64>;
+    process<uint16_t, 128> = process_c<uint16_t, 128>;
+    process<uint16_t, 256> = process_c<uint16_t, 256>;
+
+#ifdef VS_TARGET_CPU_X86
+    const int iset = instrset_detect();
+    if ((opt == 0 && iset >= 8) || opt == 3) {
+        process<uint8_t, 16> = process_avx2<uint8_t, 16>;
+        process<uint16_t, 32> = process_avx2<uint16_t, 32>;
+        process<uint16_t, 64> = process_avx2<uint16_t, 64>;
+        process<uint16_t, 128> = process_avx2<uint16_t, 128>;
+        process<uint16_t, 256> = process_avx2<uint16_t, 256>;
+    } else if ((opt == 0 && iset >= 2) || opt == 2) {
+        process<uint8_t, 16> = process_sse2<uint8_t, 16>;
+        process<uint16_t, 32> = process_sse2<uint16_t, 32>;
+        process<uint16_t, 64> = process_sse2<uint16_t, 64>;
+        process<uint16_t, 128> = process_sse2<uint16_t, 128>;
+        process<uint16_t, 256> = process_sse2<uint16_t, 256>;
+    }
+#endif
 }
 
 static void VS_CC ctmfInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
@@ -302,11 +317,16 @@ static void VS_CC ctmfCreate(const VSMap *in, VSMap *out, void *userData, VSCore
         if (err)
             d->memsize = 1048576;
 
+        const int opt = int64ToIntS(vsapi->propGetInt(in, "opt", 0, &err));
+
         if (d->radius < 1 || d->radius > 127)
             throw std::string{ "radius must be between 1 and 127 (inclusive)" };
 
         if (d->memsize < 1024)
             throw std::string{ "memsize must be greater than or equal to 1024" };
+
+        if (opt < 0 || opt > 3)
+            throw std::string{ "opt must be 0, 1, 2 or 3" };
 
         const int m = vsapi->propNumElements(in, "planes");
 
@@ -358,6 +378,8 @@ static void VS_CC ctmfCreate(const VSMap *in, VSMap *out, void *userData, VSCore
         d->modulo = d->bins - 1;
 
         d->t = 2 * d->radius * d->radius + 2 * d->radius;
+
+        selectFunctions(opt);
     } catch (const std::string & error) {
         vsapi->setError(out, ("CTMF: " + error).c_str());
         vsapi->freeNode(d->node);
@@ -376,6 +398,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
                  "clip:clip;"
                  "radius:int:opt;"
                  "memsize:int:opt;"
+                 "opt:int:opt;"
                  "planes:int[]:opt;",
                  ctmfCreate, nullptr, plugin);
 }

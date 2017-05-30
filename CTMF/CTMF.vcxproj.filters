@@ -18,5 +18,19 @@
     <ClCompile Include="CTMF.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="CTMF_SSE2.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CTMF_AVX2.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="vectorclass\instrset_detect.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="CTMF.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
