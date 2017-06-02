@@ -42,9 +42,38 @@
 #ifdef VS_TARGET_CPU_X86
 template<typename T, uint16_t bins> extern void process_sse2(const T *, T *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
 template<typename T, uint16_t bins> extern void process_avx2(const T *, T *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
+
+template<typename T1, typename T2, uint8_t step> extern void processRadius2_sse2(const VSFrameRef *, VSFrameRef *, const int, const uint8_t, const VSAPI *) noexcept;
+template<typename T1, typename T2, uint8_t step> extern void processRadius2_avx2(const VSFrameRef *, VSFrameRef *, const int, const uint8_t, const VSAPI *) noexcept;
 #endif
 
 template<typename T, uint16_t bins> static void (*process)(const T *, T *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) = nullptr;
+template<typename T1, typename T2 = void, uint8_t step = 0> static void (*processRadius2)(const VSFrameRef *, VSFrameRef *, const int, const uint8_t, const VSAPI *) = nullptr;
+
+template<typename T>
+static void copyPad(const VSFrameRef * src, VSFrameRef * dst, const int plane, const uint8_t widthPad, const VSAPI * vsapi) noexcept {
+    const unsigned width = vsapi->getFrameWidth(src, plane);
+    const unsigned height = vsapi->getFrameHeight(src, plane);
+    const unsigned stride = vsapi->getStride(dst, 0) / sizeof(T);
+    const T * srcp = reinterpret_cast<const T *>(vsapi->getReadPtr(src, plane));
+    T * VS_RESTRICT dstp = reinterpret_cast<T *>(vsapi->getWritePtr(dst, 0)) + stride * 2 + widthPad;
+
+    vs_bitblt(dstp, vsapi->getStride(dst, 0), srcp, vsapi->getStride(src, plane), width * sizeof(T), height);
+
+    for (unsigned y = 0; y < height; y++) {
+        dstp[-1] = dstp[-2] = 0;
+        dstp[width] = dstp[width + 1] = 0;
+
+        dstp += stride;
+    }
+
+    dstp = reinterpret_cast<T *>(vsapi->getWritePtr(dst, 0));
+    memset(dstp, 0, vsapi->getStride(dst, 0));
+    memset(dstp + stride, 0, vsapi->getStride(dst, 0));
+    dstp += stride * (vsapi->getFrameHeight(dst, 0) - 2);
+    memset(dstp, 0, vsapi->getStride(dst, 0));
+    memset(dstp + stride, 0, vsapi->getStride(dst, 0));
+}
 
 static inline void histogramAdd_c(const uint16_t * x, uint16_t * VS_RESTRICT y, const uint16_t bins) noexcept {
     for (uint16_t i = 0; i < bins; i++)
@@ -75,12 +104,12 @@ static void process_c(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRI
     // First row initialization
     for (int j = 0; j < width; j++) {
         hCoarse[bins * j + (srcp[j] >> d->shiftRight)] += d->radius + 1;
-        hFine[bins * (width * (srcp[j] >> d->shiftRight) + j) + (srcp[j] & d->modulo)] += d->radius + 1;
+        hFine[bins * (width * (srcp[j] >> d->shiftRight) + j) + (srcp[j] & d->mask)] += d->radius + 1;
     }
     for (int i = 0; i < d->radius; i++) {
         for (int j = 0; j < width; j++) {
             hCoarse[bins * j + (srcp[stride * i + j] >> d->shiftRight)]++;
-            hFine[bins * (width * (srcp[stride * i + j] >> d->shiftRight) + j) + (srcp[stride * i + j] & d->modulo)]++;
+            hFine[bins * (width * (srcp[stride * i + j] >> d->shiftRight) + j) + (srcp[stride * i + j] & d->mask)]++;
         }
     }
 
@@ -90,7 +119,7 @@ static void process_c(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRI
         q = p + width;
         for (int j = 0; p != q; j++) {
             hCoarse[bins * j + (*p >> d->shiftRight)]--;
-            hFine[bins * (width * (*p >> d->shiftRight) + j) + (*p & d->modulo)]--;
+            hFine[bins * (width * (*p >> d->shiftRight) + j) + (*p & d->mask)]--;
             p++;
         }
 
@@ -98,7 +127,7 @@ static void process_c(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRI
         q = p + width;
         for (int j = 0; p != q; j++) {
             hCoarse[bins * j + (*p >> d->shiftRight)]++;
-            hFine[bins * (width * (*p >> d->shiftRight) + j) + (*p & d->modulo)]++;
+            hFine[bins * (width * (*p >> d->shiftRight) + j) + (*p & d->mask)]++;
             p++;
         }
 
@@ -160,7 +189,7 @@ static void process_c(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRI
     }
 }
 
-static void selectFunctions(const unsigned opt) noexcept {
+static void selectFunctions(const unsigned opt, CTMFData * d) noexcept {
     process<uint8_t, 16> = process_c<uint8_t, 16>;
     process<uint16_t, 32> = process_c<uint16_t, 32>;
     process<uint16_t, 64> = process_c<uint16_t, 64>;
@@ -170,17 +199,29 @@ static void selectFunctions(const unsigned opt) noexcept {
 #ifdef VS_TARGET_CPU_X86
     const int iset = instrset_detect();
     if ((opt == 0 && iset >= 8) || opt == 3) {
-        process<uint8_t, 16> = process_avx2<uint8_t, 16>;
-        process<uint16_t, 32> = process_avx2<uint16_t, 32>;
-        process<uint16_t, 64> = process_avx2<uint16_t, 64>;
-        process<uint16_t, 128> = process_avx2<uint16_t, 128>;
-        process<uint16_t, 256> = process_avx2<uint16_t, 256>;
+        if (d->radius == 2) {
+            d->specialRadius2 = true;
+            processRadius2<uint8_t> = processRadius2_avx2<uint8_t, Vec32uc, 32>;
+            processRadius2<uint16_t> = processRadius2_avx2<uint16_t, Vec16us, 16>;
+        } else {
+            process<uint8_t, 16> = process_avx2<uint8_t, 16>;
+            process<uint16_t, 32> = process_avx2<uint16_t, 32>;
+            process<uint16_t, 64> = process_avx2<uint16_t, 64>;
+            process<uint16_t, 128> = process_avx2<uint16_t, 128>;
+            process<uint16_t, 256> = process_avx2<uint16_t, 256>;
+        }
     } else if ((opt == 0 && iset >= 2) || opt == 2) {
-        process<uint8_t, 16> = process_sse2<uint8_t, 16>;
-        process<uint16_t, 32> = process_sse2<uint16_t, 32>;
-        process<uint16_t, 64> = process_sse2<uint16_t, 64>;
-        process<uint16_t, 128> = process_sse2<uint16_t, 128>;
-        process<uint16_t, 256> = process_sse2<uint16_t, 256>;
+        if (d->radius == 2) {
+            d->specialRadius2 = true;
+            processRadius2<uint8_t> = processRadius2_sse2<uint8_t, Vec16uc, 16>;
+            processRadius2<uint16_t> = processRadius2_sse2<uint16_t, Vec8us, 8>;
+        } else {
+            process<uint8_t, 16> = process_sse2<uint8_t, 16>;
+            process<uint16_t, 32> = process_sse2<uint16_t, 32>;
+            process<uint16_t, 64> = process_sse2<uint16_t, 64>;
+            process<uint16_t, 128> = process_sse2<uint16_t, 128>;
+            process<uint16_t, 256> = process_sse2<uint16_t, 256>;
+        }
     }
 #endif
 }
@@ -191,7 +232,7 @@ static void VS_CC ctmfInit(VSMap *in, VSMap *out, void **instanceData, VSNode *n
 }
 
 static const VSFrameRef *VS_CC ctmfGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
-    const CTMFData * d = static_cast<const CTMFData *>(*instanceData);
+    CTMFData * d = static_cast<CTMFData *>(*instanceData);
 
     if (activationReason == arInitial) {
         vsapi->requestFrameFilter(n, d->node, frameCtx);
@@ -201,91 +242,131 @@ static const VSFrameRef *VS_CC ctmfGetFrame(int n, int activationReason, void **
         const int pl[]{ 0, 1, 2 };
         VSFrameRef * dst = vsapi->newVideoFrame2(d->vi->format, d->vi->width, d->vi->height, fr, pl, src, core);
 
-        for (int plane = 0; plane < d->vi->format->numPlanes; plane++) {
-            if (d->process[plane]) {
-                const int width = vsapi->getFrameWidth(src, plane);
-                const int height = vsapi->getFrameHeight(src, plane);
-                const int stride = vsapi->getStride(src, plane);
-                const uint8_t * srcp = vsapi->getReadPtr(src, plane);
-                uint8_t * dstp = vsapi->getWritePtr(dst, plane);
+        VSFrameRef * pad = nullptr;
+        if (d->specialRadius2)
+            pad = vsapi->newVideoFrame(vsapi->registerFormat(cmGray, stInteger, d->vi->format->bitsPerSample, 0, 0, core),
+                                       d->vi->width + d->widthPad * 2, d->vi->height + 4, nullptr, core);
 
-                uint16_t * hCoarse = vs_aligned_malloc<uint16_t>(d->bins * width * sizeof(uint16_t), 32);
-                uint16_t * hFine = vs_aligned_malloc<uint16_t>(d->bins * d->bins * width * sizeof(uint16_t), 32);
-                if (!hCoarse || !hFine) {
-                    vsapi->setFilterError("CTMF: malloc failure (hCoarse/hFine)", frameCtx);
-                    vsapi->freeFrame(src);
-                    vsapi->freeFrame(dst);
-                    return nullptr;
-                }
+        try {
+            auto threadId = std::this_thread::get_id();
 
-                if (d->vi->format->bitsPerSample == 8) {
-                    for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
-                        int stripe = d->stripeSize[plane];
-                        // Make sure that the filter kernel fits into one stripe
-                        if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
-                            stripe = width - i;
-
-                        process<uint8_t, 16>(srcp + i, dstp + i, hCoarse, hFine, d, stripe, height, stride, i == 0, stripe == width - i);
-
-                        if (stripe == width - i)
-                            break;
-                    }
-                } else if (d->vi->format->bitsPerSample == 10) {
-                    for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
-                        int stripe = d->stripeSize[plane];
-                        // Make sure that the filter kernel fits into one stripe
-                        if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
-                            stripe = width - i;
-
-                        process<uint16_t, 32>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i, hCoarse, hFine, d, stripe, height, stride / 2, i == 0, stripe == width - i);
-
-                        if (stripe == width - i)
-                            break;
-                    }
-                } else if (d->vi->format->bitsPerSample == 12) {
-                    for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
-                        int stripe = d->stripeSize[plane];
-                        // Make sure that the filter kernel fits into one stripe
-                        if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
-                            stripe = width - i;
-
-                        process<uint16_t, 64>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i, hCoarse, hFine, d, stripe, height, stride / 2, i == 0, stripe == width - i);
-
-                        if (stripe == width - i)
-                            break;
-                    }
-                } else if (d->vi->format->bitsPerSample == 14) {
-                    for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
-                        int stripe = d->stripeSize[plane];
-                        // Make sure that the filter kernel fits into one stripe
-                        if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
-                            stripe = width - i;
-
-                        process<uint16_t, 128>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i, hCoarse, hFine, d, stripe, height, stride / 2, i == 0, stripe == width - i);
-
-                        if (stripe == width - i)
-                            break;
-                    }
+            if (!d->hCoarse.count(threadId)) {
+                if (!d->specialRadius2) {
+                    uint16_t * hCoarse = vs_aligned_malloc<uint16_t>(d->bins * d->vi->width * sizeof(uint16_t), 32);
+                    if (!hCoarse)
+                        throw std::string{ "malloc failure (hCoarse)" };
+                    d->hCoarse.emplace(threadId, hCoarse);
                 } else {
-                    for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
-                        int stripe = d->stripeSize[plane];
-                        // Make sure that the filter kernel fits into one stripe
-                        if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
-                            stripe = width - i;
+                    d->hCoarse.emplace(threadId, nullptr);
+                }
+            }
 
-                        process<uint16_t, 256>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i, hCoarse, hFine, d, stripe, height, stride / 2, i == 0, stripe == width - i);
+            if (!d->hFine.count(threadId)) {
+                if (!d->specialRadius2) {
+                    uint16_t * hFine = vs_aligned_malloc<uint16_t>(d->bins * d->bins * d->vi->width * sizeof(uint16_t), 32);
+                    if (!hFine)
+                        throw std::string{ "malloc failure (hFine)" };
+                    d->hFine.emplace(threadId, hFine);
+                } else {
+                    d->hFine.emplace(threadId, nullptr);
+                }
+            }
 
-                        if (stripe == width - i)
-                            break;
+            for (int plane = 0; plane < d->vi->format->numPlanes; plane++) {
+                if (d->process[plane]) {
+                    if (d->specialRadius2) {
+                        if (d->vi->format->bytesPerSample == 1) {
+                            copyPad<uint8_t>(src, pad, plane, d->widthPad, vsapi);
+                            processRadius2<uint8_t>(pad, dst, plane, d->widthPad, vsapi);
+                        } else {
+                            copyPad<uint16_t>(src, pad, plane, d->widthPad, vsapi);
+                            processRadius2<uint16_t>(pad, dst, plane, d->widthPad, vsapi);
+                        }
+                    } else {
+                        const int width = vsapi->getFrameWidth(src, plane);
+                        const int height = vsapi->getFrameHeight(src, plane);
+                        const int stride = vsapi->getStride(src, plane);
+                        const uint8_t * srcp = vsapi->getReadPtr(src, plane);
+                        uint8_t * dstp = vsapi->getWritePtr(dst, plane);
+
+                        if (d->vi->format->bitsPerSample == 8) {
+                            for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
+                                int stripe = d->stripeSize[plane];
+                                // Make sure that the filter kernel fits into one stripe
+                                if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
+                                    stripe = width - i;
+
+                                process<uint8_t, 16>(srcp + i, dstp + i, d->hCoarse.at(threadId), d->hFine.at(threadId), d, stripe, height, stride, i == 0, stripe == width - i);
+
+                                if (stripe == width - i)
+                                    break;
+                            }
+                        } else if (d->vi->format->bitsPerSample == 10) {
+                            for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
+                                int stripe = d->stripeSize[plane];
+                                // Make sure that the filter kernel fits into one stripe
+                                if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
+                                    stripe = width - i;
+
+                                process<uint16_t, 32>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i,
+                                                      d->hCoarse.at(threadId), d->hFine.at(threadId), d, stripe, height, stride / 2, i == 0, stripe == width - i);
+
+                                if (stripe == width - i)
+                                    break;
+                            }
+                        } else if (d->vi->format->bitsPerSample == 12) {
+                            for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
+                                int stripe = d->stripeSize[plane];
+                                // Make sure that the filter kernel fits into one stripe
+                                if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
+                                    stripe = width - i;
+
+                                process<uint16_t, 64>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i,
+                                                      d->hCoarse.at(threadId), d->hFine.at(threadId), d, stripe, height, stride / 2, i == 0, stripe == width - i);
+
+                                if (stripe == width - i)
+                                    break;
+                            }
+                        } else if (d->vi->format->bitsPerSample == 14) {
+                            for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
+                                int stripe = d->stripeSize[plane];
+                                // Make sure that the filter kernel fits into one stripe
+                                if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
+                                    stripe = width - i;
+
+                                process<uint16_t, 128>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i,
+                                                       d->hCoarse.at(threadId), d->hFine.at(threadId), d, stripe, height, stride / 2, i == 0, stripe == width - i);
+
+                                if (stripe == width - i)
+                                    break;
+                            }
+                        } else {
+                            for (int i = 0; i < width; i += d->stripeSize[plane] - 2 * d->radius) {
+                                int stripe = d->stripeSize[plane];
+                                // Make sure that the filter kernel fits into one stripe
+                                if (i + d->stripeSize[plane] - 2 * d->radius >= width || width - (i + d->stripeSize[plane] - 2 * d->radius) < 2 * d->radius + 1)
+                                    stripe = width - i;
+
+                                process<uint16_t, 256>(reinterpret_cast<const uint16_t *>(srcp) + i, reinterpret_cast<uint16_t *>(dstp) + i,
+                                                       d->hCoarse.at(threadId), d->hFine.at(threadId), d, stripe, height, stride / 2, i == 0, stripe == width - i);
+
+                                if (stripe == width - i)
+                                    break;
+                            }
+                        }
                     }
                 }
-
-                vs_aligned_free(hCoarse);
-                vs_aligned_free(hFine);
             }
+        } catch (const std::string & error) {
+            vsapi->setFilterError(("CTMF: " + error).c_str(), frameCtx);
+            vsapi->freeFrame(src);
+            vsapi->freeFrame(pad);
+            vsapi->freeFrame(dst);
+            return nullptr;
         }
 
         vsapi->freeFrame(src);
+        vsapi->freeFrame(pad);
         return dst;
     }
 
@@ -294,7 +375,15 @@ static const VSFrameRef *VS_CC ctmfGetFrame(int n, int activationReason, void **
 
 static void VS_CC ctmfFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
     CTMFData * d = static_cast<CTMFData *>(instanceData);
+
     vsapi->freeNode(d->node);
+
+    for (auto & iter : d->hCoarse)
+        vs_aligned_free(iter.second);
+
+    for (auto & iter : d->hFine)
+        vs_aligned_free(iter.second);
+
     delete d;
 }
 
@@ -313,16 +402,16 @@ static void VS_CC ctmfCreate(const VSMap *in, VSMap *out, void *userData, VSCore
         if (err)
             d->radius = 2;
 
-        d->memsize = int64ToIntS(vsapi->propGetInt(in, "memsize", 0, &err));
+        int memsize = int64ToIntS(vsapi->propGetInt(in, "memsize", 0, &err));
         if (err)
-            d->memsize = 1048576;
+            memsize = 1048576;
 
         const int opt = int64ToIntS(vsapi->propGetInt(in, "opt", 0, &err));
 
         if (d->radius < 1 || d->radius > 127)
             throw std::string{ "radius must be between 1 and 127 (inclusive)" };
 
-        if (d->memsize < 1024)
+        if (memsize < 1024)
             throw std::string{ "memsize must be greater than or equal to 1024" };
 
         if (opt < 0 || opt > 3)
@@ -344,6 +433,14 @@ static void VS_CC ctmfCreate(const VSMap *in, VSMap *out, void *userData, VSCore
 
             d->process[n] = true;
         }
+
+        selectFunctions(opt, d.get());
+
+        d->widthPad = 32 / d->vi->format->bytesPerSample;
+
+        const unsigned numThreads = vsapi->getCoreInfo(core)->numThreads;
+        d->hCoarse.reserve(numThreads);
+        d->hFine.reserve(numThreads);
 
         for (int plane = 0; plane < d->vi->format->numPlanes; plane++) {
             if (d->process[plane]) {
@@ -368,18 +465,16 @@ static void VS_CC ctmfCreate(const VSMap *in, VSMap *out, void *userData, VSCore
                 else
                     histogramSize = sizeof(Histogram<256>);
 
-                const int stripes = static_cast<int>(std::ceil(static_cast<float>(width - 2 * d->radius) / (d->memsize / histogramSize - 2 * d->radius)));
+                const int stripes = static_cast<int>(std::ceil(static_cast<float>(width - 2 * d->radius) / (memsize / histogramSize - 2 * d->radius)));
                 d->stripeSize[plane] = static_cast<int>(std::ceil(static_cast<float>(width + stripes * 2 * d->radius - 2 * d->radius) / stripes));
             }
         }
 
         d->bins = 1 << (d->vi->format->bitsPerSample / 2);
         d->shiftRight = d->vi->format->bitsPerSample / 2;
-        d->modulo = d->bins - 1;
+        d->mask = d->bins - 1;
 
         d->t = 2 * d->radius * d->radius + 2 * d->radius;
-
-        selectFunctions(opt);
     } catch (const std::string & error) {
         vsapi->setError(out, ("CTMF: " + error).c_str());
         vsapi->freeNode(d->node);
