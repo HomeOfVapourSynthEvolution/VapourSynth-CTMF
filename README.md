@@ -5,6 +5,7 @@ Median filter for VapourSynth.
 
 Ported from https://nomis80.org/ctmf.html
 
+
 Usage
 =====
 
@@ -23,3 +24,13 @@ Usage
   * 3 = use avx2
 
 * planes: A list of the planes to process. By default all planes are processed.
+
+
+Compilation
+===========
+
+```
+./autogen.sh
+./configure
+make
+```
