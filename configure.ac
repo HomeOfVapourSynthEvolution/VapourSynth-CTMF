@@ -1,4 +1,4 @@
-AC_INIT([CTMF], [3], [https://github.com/HomeOfVapourSynthEvolution/VapourSynth-CTMF/issues], [CTMF], [https://github.com/HomeOfVapourSynthEvolution/VapourSynth-CTMF/])
+AC_INIT([CTMF], [4], [https://github.com/HomeOfVapourSynthEvolution/VapourSynth-CTMF/issues], [CTMF], [https://github.com/HomeOfVapourSynthEvolution/VapourSynth-CTMF/])
 
 : ${CXXFLAGS=""}
 
@@ -7,9 +7,9 @@ AM_SILENT_RULES([yes])
 
 LT_INIT([disable-static win32-dll])
 
-AC_PROG_CXX
-
 AC_CANONICAL_HOST
+
+AC_PROG_CXX
 
 
 X86="false"
@@ -17,7 +17,7 @@ X86="false"
 AS_CASE(
         [$host_cpu],
         [i?86], [BITS="32" X86="true"],
-        [x86_64], [BITS="64" X86="true"],
+        [x86_64], [BITS="64" X86="true"]
 )
 
 AS_CASE(
