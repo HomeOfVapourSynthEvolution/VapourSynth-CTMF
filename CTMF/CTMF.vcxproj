@@ -54,11 +54,14 @@
     <ClCompile Include="CTMF_AVX2.cpp">
       <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
     </ClCompile>
+    <ClCompile Include="CTMF_AVX512.cpp">
+      <EnableEnhancedInstructionSet Condition="'$(Configuration)|$(Platform)'=='Release|x64'">AdvancedVectorExtensions512</EnableEnhancedInstructionSet>
+    </ClCompile>
     <ClCompile Include="CTMF_SSE2.cpp" />
-    <ClCompile Include="vectorclass\instrset_detect.cpp" />
+    <ClCompile Include="VCL2\instrset_detect.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="CTMF.hpp" />
+    <ClInclude Include="CTMF.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -1,184 +1,56 @@
-#ifdef VS_TARGET_CPU_X86
-#include "CTMF.hpp"
+#ifdef CTMF_X86
+#include "CTMF.h"
 
-static inline void histogramAdd_sse2(const uint16_t * _x, uint16_t * _y, const uint16_t bins) noexcept {
-    for (uint16_t i = 0; i < bins; i += 8) {
-        const Vec8us x = Vec8us().load_a(_x + i);
-        const Vec8us y = Vec8us().load_a(_y + i);
-        (y + x).store_a(_y + i);
-    }
-}
+template<typename pixel_t>
+void filterRadius2_sse2(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept {
+    using vec_t = std::conditional_t<std::is_same_v<pixel_t, uint8_t>, Vec16uc, std::conditional_t<std::is_same_v<pixel_t, uint16_t>, Vec8us, Vec4f>>;
 
-static inline void histogramSub_sse2(const uint16_t * _x, uint16_t * _y, const uint16_t bins) noexcept {
-    for (uint16_t i = 0; i < bins; i += 8) {
-        const Vec8us x = Vec8us().load_a(_x + i);
-        const Vec8us y = Vec8us().load_a(_y + i);
-        (y - x).store_a(_y + i);
-    }
-}
+    auto sort = [](vec_t & a, vec_t & b) noexcept {
+        const auto t = a;
+        a = min(t, b);
+        b = max(t, b);
+    };
 
-static inline void histogramMulAdd_sse2(const uint16_t a, const uint16_t * _x, uint16_t * _y, const uint16_t bins) noexcept {
-    for (uint16_t i = 0; i < bins; i += 8) {
-        const Vec8us x = Vec8us().load_a(_x + i);
-        const Vec8us y = Vec8us().load_a(_y + i);
-        (y + a * x).store_a(_y + i);
-    }
-}
+    const auto width = vsapi->getFrameWidth(dst, plane);
+    const auto height = vsapi->getFrameHeight(dst, plane);
+    const int srcStride = vsapi->getStride(src, 0) / sizeof(pixel_t);
+    const int dstStride = vsapi->getStride(dst, plane) / sizeof(pixel_t);
+    auto srcp = reinterpret_cast<const pixel_t *>(vsapi->getReadPtr(src, 0)) + srcStride * 2 + 2;
+    auto dstp = reinterpret_cast<pixel_t *>(vsapi->getWritePtr(dst, plane));
 
-template<typename T, uint16_t bins>
-void process_sse2(const T * srcp, T * VS_RESTRICT dstp, uint16_t * VS_RESTRICT hCoarse, uint16_t * VS_RESTRICT hFine, const CTMFData * d,
-                  const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept {
-    const T * p, * q;
+    auto above2 = srcp - srcStride * 2;
+    auto above1 = srcp - srcStride;
+    auto below1 = srcp + srcStride;
+    auto below2 = srcp + srcStride * 2;
 
-    Histogram<bins> H;
-    uint16_t luc[bins];
-
-    memset(hCoarse, 0, bins * width * sizeof(uint16_t));
-    memset(hFine, 0, bins * bins * width * sizeof(uint16_t));
-
-    // First row initialization
-    for (int j = 0; j < width; j++) {
-        hCoarse[bins * j + (srcp[j] >> d->shiftRight)] += d->radius + 1;
-        hFine[bins * (width * (srcp[j] >> d->shiftRight) + j) + (srcp[j] & d->mask)] += d->radius + 1;
-    }
-    for (int i = 0; i < d->radius; i++) {
-        for (int j = 0; j < width; j++) {
-            hCoarse[bins * j + (srcp[stride * i + j] >> d->shiftRight)]++;
-            hFine[bins * (width * (srcp[stride * i + j] >> d->shiftRight) + j) + (srcp[stride * i + j] & d->mask)]++;
-        }
-    }
-
-    for (int i = 0; i < height; i++) {
-        // Update column histograms for entire row
-        p = srcp + stride * std::max(0, i - d->radius - 1);
-        q = p + width;
-        for (int j = 0; p != q; j++) {
-            hCoarse[bins * j + (*p >> d->shiftRight)]--;
-            hFine[bins * (width * (*p >> d->shiftRight) + j) + (*p & d->mask)]--;
-            p++;
-        }
-
-        p = srcp + stride * std::min(height - 1, i + d->radius);
-        q = p + width;
-        for (int j = 0; p != q; j++) {
-            hCoarse[bins * j + (*p >> d->shiftRight)]++;
-            hFine[bins * (width * (*p >> d->shiftRight) + j) + (*p & d->mask)]++;
-            p++;
-        }
-
-        // First column initialization
-        memset(&H, 0, sizeof(H));
-        memset(luc, 0, sizeof(luc));
-        if (padLeft)
-            histogramMulAdd_sse2(d->radius, &hCoarse[0], H.coarse, bins);
-        for (int j = 0; j < (padLeft ? d->radius : 2 * d->radius); j++)
-            histogramAdd_sse2(&hCoarse[bins * j], H.coarse, bins);
-        for (int k = 0; k < bins; k++)
-            histogramMulAdd_sse2(2 * d->radius + 1, &hFine[bins * width * k], &H.fine[k][0], bins);
-
-        for (int j = padLeft ? 0 : d->radius; j < (padRight ? width : width - d->radius); j++) {
-            uint16_t sum = 0, * segment;
-            int k, b;
-
-            histogramAdd_sse2(&hCoarse[bins * std::min(j + d->radius, width - 1)], H.coarse, bins);
-
-            // Find median at coarse level
-            for (k = 0; k < bins; k++) {
-                sum += H.coarse[k];
-                if (sum > d->t) {
-                    sum -= H.coarse[k];
-                    break;
-                }
-            }
-            assert(k < bins);
-
-            // Update corresponding histogram segment
-            if (luc[k] <= j - d->radius) {
-                memset(&H.fine[k], 0, bins * sizeof(uint16_t));
-                for (luc[k] = j - d->radius; luc[k] < std::min(j + d->radius + 1, width); luc[k]++)
-                    histogramAdd_sse2(&hFine[bins * (width * k + luc[k])], H.fine[k], bins);
-                if (luc[k] < j + d->radius + 1) {
-                    histogramMulAdd_sse2(j + d->radius + 1 - width, &hFine[bins * (width * k + width - 1)], &H.fine[k][0], bins);
-                    luc[k] = j + d->radius + 1;
-                }
-            } else {
-                for (; luc[k] < j + d->radius + 1; luc[k]++) {
-                    histogramSub_sse2(&hFine[bins * (width * k + std::max(luc[k] - 2 * d->radius - 1, 0))], H.fine[k], bins);
-                    histogramAdd_sse2(&hFine[bins * (width * k + std::min(static_cast<int>(luc[k]), width - 1))], H.fine[k], bins);
-                }
-            }
-
-            histogramSub_sse2(&hCoarse[bins * std::max(j - d->radius, 0)], H.coarse, bins);
-
-            // Find median in segment
-            segment = H.fine[k];
-            for (b = 0; b < bins; b++) {
-                sum += segment[b];
-                if (sum > d->t) {
-                    dstp[stride * i + j] = bins * k + b;
-                    break;
-                }
-            }
-            assert(b < bins);
-        }
-    }
-}
-
-template void process_sse2<uint8_t, 16>(const uint8_t *, uint8_t *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
-template void process_sse2<uint16_t, 32>(const uint16_t *, uint16_t *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
-template void process_sse2<uint16_t, 64>(const uint16_t *, uint16_t *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
-template void process_sse2<uint16_t, 128>(const uint16_t *, uint16_t *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
-template void process_sse2<uint16_t, 256>(const uint16_t *, uint16_t *, uint16_t *, uint16_t *, const CTMFData *, const int, const int, const int, const bool, const bool) noexcept;
-
-template<typename T>
-static inline void sort(T & a, T & b) noexcept {
-    const T temp = max(a, b);
-    a = min(a, b);
-    b = temp;
-}
-
-template<typename T1, typename T2, uint8_t step>
-void processRadius2_sse2(const VSFrameRef * src, VSFrameRef * dst, const int plane, const uint8_t widthPad, const VSAPI * vsapi) noexcept {
-    const int width = vsapi->getFrameWidth(dst, plane);
-    const unsigned height = vsapi->getFrameHeight(dst, plane);
-    const unsigned srcStride = vsapi->getStride(src, 0) / sizeof(T1);
-    const unsigned dstStride = vsapi->getStride(dst, plane) / sizeof(T1);
-    const T1 * srcp = reinterpret_cast<const T1 *>(vsapi->getReadPtr(src, 0)) + srcStride * 2 + widthPad;
-    T1 * dstp = reinterpret_cast<T1 *>(vsapi->getWritePtr(dst, plane));
-
-    const T1 * srcp2p = srcp - srcStride * 2;
-    const T1 * srcp1p = srcp - srcStride;
-    const T1 * srcp1n = srcp + srcStride;
-    const T1 * srcp2n = srcp + srcStride * 2;
-
-    for (unsigned y = 0; y < height; y++) {
-        for (int x = 0; x < width; x += step) {
-            T2 a[25];
-            a[0] = T2().load(srcp2p + x - 2);
-            a[1] = T2().load(srcp2p + x - 1);
-            a[2] = T2().load_a(srcp2p + x);
-            a[3] = T2().load(srcp2p + x + 1);
-            a[4] = T2().load(srcp2p + x + 2);
-            a[5] = T2().load(srcp1p + x - 2);
-            a[6] = T2().load(srcp1p + x - 1);
-            a[7] = T2().load_a(srcp1p + x);
-            a[8] = T2().load(srcp1p + x + 1);
-            a[9] = T2().load(srcp1p + x + 2);
-            a[10] = T2().load(srcp + x - 2);
-            a[11] = T2().load(srcp + x - 1);
-            a[12] = T2().load_a(srcp + x);
-            a[13] = T2().load(srcp + x + 1);
-            a[14] = T2().load(srcp + x + 2);
-            a[15] = T2().load(srcp1n + x - 2);
-            a[16] = T2().load(srcp1n + x - 1);
-            a[17] = T2().load_a(srcp1n + x);
-            a[18] = T2().load(srcp1n + x + 1);
-            a[19] = T2().load(srcp1n + x + 2);
-            a[20] = T2().load(srcp2n + x - 2);
-            a[21] = T2().load(srcp2n + x - 1);
-            a[22] = T2().load_a(srcp2n + x);
-            a[23] = T2().load(srcp2n + x + 1);
-            a[24] = T2().load(srcp2n + x + 2);
+    for (auto y = 0; y < height; y++) {
+        for (auto x = 0; x < width; x += vec_t().size()) {
+            vec_t a[25];
+            a[0] = vec_t().load(above2 + x - 2);
+            a[1] = vec_t().load(above2 + x - 1);
+            a[2] = vec_t().load(above2 + x);
+            a[3] = vec_t().load(above2 + x + 1);
+            a[4] = vec_t().load(above2 + x + 2);
+            a[5] = vec_t().load(above1 + x - 2);
+            a[6] = vec_t().load(above1 + x - 1);
+            a[7] = vec_t().load(above1 + x);
+            a[8] = vec_t().load(above1 + x + 1);
+            a[9] = vec_t().load(above1 + x + 2);
+            a[10] = vec_t().load(srcp + x - 2);
+            a[11] = vec_t().load(srcp + x - 1);
+            a[12] = vec_t().load(srcp + x);
+            a[13] = vec_t().load(srcp + x + 1);
+            a[14] = vec_t().load(srcp + x + 2);
+            a[15] = vec_t().load(below1 + x - 2);
+            a[16] = vec_t().load(below1 + x - 1);
+            a[17] = vec_t().load(below1 + x);
+            a[18] = vec_t().load(below1 + x + 1);
+            a[19] = vec_t().load(below1 + x + 2);
+            a[20] = vec_t().load(below2 + x - 2);
+            a[21] = vec_t().load(below2 + x - 1);
+            a[22] = vec_t().load(below2 + x);
+            a[23] = vec_t().load(below2 + x + 1);
+            a[24] = vec_t().load(below2 + x + 2);
 
             sort(a[0], a[1]); sort(a[3], a[4]); sort(a[2], a[4]);
             sort(a[2], a[3]); sort(a[6], a[7]); sort(a[5], a[7]);
@@ -234,18 +106,159 @@ void processRadius2_sse2(const VSFrameRef * src, VSFrameRef * dst, const int pla
             a[10] = min(a[10], a[20]);
             a[12] = max(a[10], a[12]);
 
-            a[12].stream(dstp + x);
+            a[12].store_nt(dstp + x);
         }
 
-        srcp2p += srcStride;
-        srcp1p += srcStride;
+        above2 += srcStride;
+        above1 += srcStride;
         srcp += srcStride;
-        srcp1n += srcStride;
-        srcp2n += srcStride;
+        below1 += srcStride;
+        below2 += srcStride;
         dstp += dstStride;
     }
 }
 
-template void processRadius2_sse2<uint8_t, Vec16uc, 16>(const VSFrameRef *, VSFrameRef *, const int, const uint8_t, const VSAPI *) noexcept;
-template void processRadius2_sse2<uint16_t, Vec8us, 8>(const VSFrameRef *, VSFrameRef *, const int, const uint8_t, const VSAPI *) noexcept;
+template<typename pixel_t, uint16_t bins>
+void ctmfHelper_sse2(const void * _srcp, void * _dstp, const CTMFData * const VS_RESTRICT d,
+                     const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept {
+    /**
+     * Adds histograms x and y and stores the result in y.
+     */
+    auto histogramAdd = [](const uint16_t * _x, uint16_t * _y) noexcept {
+        for (auto i = 0; i < bins; i += Vec8us().size()) {
+            const auto x = Vec8us().load_a(_x + i);
+            const auto y = Vec8us().load_a(_y + i);
+            (y + x).store_a(_y + i);
+        }
+    };
+
+    /**
+     * Subtracts histogram x from y and stores the result in y.
+     */
+    auto histogramSub = [](const uint16_t * _x, uint16_t * _y) noexcept {
+        for (auto i = 0; i < bins; i += Vec8us().size()) {
+            const auto x = Vec8us().load_a(_x + i);
+            const auto y = Vec8us().load_a(_y + i);
+            (y - x).store_a(_y + i);
+        }
+    };
+
+    auto histogramMulAdd = [](const uint16_t a, const uint16_t * _x, uint16_t * _y) noexcept {
+        for (auto i = 0; i < bins; i += Vec8us().size()) {
+            const auto x = Vec8us().load_a(_x + i);
+            const auto y = Vec8us().load_a(_y + i);
+            (y + a * x).store_a(_y + i);
+        }
+    };
+
+    auto srcp = static_cast<const pixel_t *>(_srcp);
+    auto dstp = static_cast<pixel_t *>(_dstp);
+
+    const auto threadId = std::this_thread::get_id();
+    auto hCoarse = d->hCoarse.at(threadId).get();
+    auto hFine = d->hFine.at(threadId).get();
+
+    const pixel_t * p, * q;
+
+    Histogram<bins> H;
+    uint16_t luc[bins];
+
+    memset(hCoarse, 0, bins * width * sizeof(uint16_t));
+    memset(hFine, 0, bins * bins * width * sizeof(uint16_t));
+
+    // First row initialization
+    for (auto j = 0; j < width; j++) {
+        hCoarse[bins * j + (srcp[j] >> d->shift)] += d->radius + 1;
+        hFine[bins * (width * (srcp[j] >> d->shift) + j) + (srcp[j] & d->mask)] += d->radius + 1;
+    }
+    for (auto i = 0; i < d->radius; i++) {
+        for (auto j = 0; j < width; j++) {
+            hCoarse[bins * j + (srcp[stride * i + j] >> d->shift)]++;
+            hFine[bins * (width * (srcp[stride * i + j] >> d->shift) + j) + (srcp[stride * i + j] & d->mask)]++;
+        }
+    }
+
+    for (auto i = 0; i < height; i++) {
+        // Update column histograms for entire row
+        p = srcp + stride * std::max(0, i - d->radius - 1);
+        q = p + width;
+        for (auto j = 0; p != q; j++) {
+            hCoarse[bins * j + (*p >> d->shift)]--;
+            hFine[bins * (width * (*p >> d->shift) + j) + (*p & d->mask)]--;
+            p++;
+        }
+
+        p = srcp + stride * std::min(height - 1, i + d->radius);
+        q = p + width;
+        for (auto j = 0; p != q; j++) {
+            hCoarse[bins * j + (*p >> d->shift)]++;
+            hFine[bins * (width * (*p >> d->shift) + j) + (*p & d->mask)]++;
+            p++;
+        }
+
+        // First column initialization
+        memset(&H, 0, sizeof(H));
+        memset(luc, 0, sizeof(luc));
+        if (padLeft)
+            histogramMulAdd(d->radius, &hCoarse[0], H.coarse);
+        for (auto j = 0; j < (padLeft ? d->radius : 2 * d->radius); j++)
+            histogramAdd(&hCoarse[bins * j], H.coarse);
+        for (auto k = 0; k < bins; k++)
+            histogramMulAdd(2 * d->radius + 1, &hFine[bins * width * k], &H.fine[k][0]);
+
+        for (auto j = padLeft ? 0 : d->radius; j < (padRight ? width : width - d->radius); j++) {
+            uint16_t sum = 0, * segment;
+            int k;
+
+            histogramAdd(&hCoarse[bins * std::min(j + d->radius, width - 1)], H.coarse);
+
+            // Find median at coarse level
+            for (k = 0; k < bins; k++) {
+                sum += H.coarse[k];
+                if (sum > d->t) {
+                    sum -= H.coarse[k];
+                    break;
+                }
+            }
+
+            // Update corresponding histogram segment
+            if (luc[k] <= j - d->radius) {
+                memset(&H.fine[k], 0, bins * sizeof(uint16_t));
+                for (luc[k] = j - d->radius; luc[k] < std::min(j + d->radius + 1, width); luc[k]++)
+                    histogramAdd(&hFine[bins * (width * k + luc[k])], H.fine[k]);
+                if (luc[k] < j + d->radius + 1) {
+                    histogramMulAdd(j + d->radius + 1 - width, &hFine[bins * (width * k + width - 1)], &H.fine[k][0]);
+                    luc[k] = j + d->radius + 1;
+                }
+            } else {
+                for (; luc[k] < j + d->radius + 1; luc[k]++) {
+                    histogramSub(&hFine[bins * (width * k + std::max(luc[k] - 2 * d->radius - 1, 0))], H.fine[k]);
+                    histogramAdd(&hFine[bins * (width * k + std::min(static_cast<int>(luc[k]), width - 1))], H.fine[k]);
+                }
+            }
+
+            histogramSub(&hCoarse[bins * std::max(j - d->radius, 0)], H.coarse);
+
+            // Find median in segment
+            segment = H.fine[k];
+            for (auto b = 0; b < bins; b++) {
+                sum += segment[b];
+                if (sum > d->t) {
+                    dstp[stride * i + j] = bins * k + b;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+template void filterRadius2_sse2<uint8_t>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
+template void filterRadius2_sse2<uint16_t>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
+template void filterRadius2_sse2<float>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
+
+template void ctmfHelper_sse2<uint8_t, 16>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_sse2<uint16_t, 32>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_sse2<uint16_t, 64>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_sse2<uint16_t, 128>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_sse2<uint16_t, 256>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
 #endif

@@ -2,8 +2,8 @@
 #include "CTMF.h"
 
 template<typename pixel_t>
-void filterRadius2_avx2(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept {
-    using vec_t = std::conditional_t<std::is_same_v<pixel_t, uint8_t>, Vec32uc, std::conditional_t<std::is_same_v<pixel_t, uint16_t>, Vec16us, Vec8f>>;
+void filterRadius2_avx512(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept {
+    using vec_t = std::conditional_t<std::is_same_v<pixel_t, uint8_t>, Vec64uc, std::conditional_t<std::is_same_v<pixel_t, uint16_t>, Vec32us, Vec16f>>;
 
     auto sort = [](vec_t & a, vec_t & b) noexcept {
         const auto t = a;
@@ -119,15 +119,15 @@ void filterRadius2_avx2(const VSFrameRef * src, VSFrameRef * dst, const int plan
 }
 
 template<typename pixel_t, uint16_t bins>
-void ctmfHelper_avx2(const void * _srcp, void * _dstp, const CTMFData * const VS_RESTRICT d,
-                     const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept {
+void ctmfHelper_avx512(const void * _srcp, void * _dstp, const CTMFData * const VS_RESTRICT d,
+                       const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept {
     /**
      * Adds histograms x and y and stores the result in y.
      */
     auto histogramAdd = [](const uint16_t * _x, uint16_t * _y) noexcept {
-        for (auto i = 0; i < bins; i += Vec16us().size()) {
-            const auto x = Vec16us().load_a(_x + i);
-            const auto y = Vec16us().load_a(_y + i);
+        for (auto i = 0; i < bins; i += Vec32us().size()) {
+            const auto x = Vec32us().load_a(_x + i);
+            const auto y = Vec32us().load_a(_y + i);
             (y + x).store_a(_y + i);
         }
     };
@@ -136,17 +136,17 @@ void ctmfHelper_avx2(const void * _srcp, void * _dstp, const CTMFData * const VS
      * Subtracts histogram x from y and stores the result in y.
      */
     auto histogramSub = [](const uint16_t * _x, uint16_t * _y) noexcept {
-        for (auto i = 0; i < bins; i += Vec16us().size()) {
-            const auto x = Vec16us().load_a(_x + i);
-            const auto y = Vec16us().load_a(_y + i);
+        for (auto i = 0; i < bins; i += Vec32us().size()) {
+            const auto x = Vec32us().load_a(_x + i);
+            const auto y = Vec32us().load_a(_y + i);
             (y - x).store_a(_y + i);
         }
     };
 
     auto histogramMulAdd = [](const uint16_t a, const uint16_t * _x, uint16_t * _y) noexcept {
-        for (auto i = 0; i < bins; i += Vec16us().size()) {
-            const auto x = Vec16us().load_a(_x + i);
-            const auto y = Vec16us().load_a(_y + i);
+        for (auto i = 0; i < bins; i += Vec32us().size()) {
+            const auto x = Vec32us().load_a(_x + i);
+            const auto y = Vec32us().load_a(_y + i);
             (y + a * x).store_a(_y + i);
         }
     };
@@ -252,13 +252,13 @@ void ctmfHelper_avx2(const void * _srcp, void * _dstp, const CTMFData * const VS
     }
 }
 
-template void filterRadius2_avx2<uint8_t>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
-template void filterRadius2_avx2<uint16_t>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
-template void filterRadius2_avx2<float>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
+template void filterRadius2_avx512<uint8_t>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
+template void filterRadius2_avx512<uint16_t>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
+template void filterRadius2_avx512<float>(const VSFrameRef * src, VSFrameRef * dst, const int plane, const VSAPI * vsapi) noexcept;
 
-template void ctmfHelper_avx2<uint8_t, 16>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
-template void ctmfHelper_avx2<uint16_t, 32>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
-template void ctmfHelper_avx2<uint16_t, 64>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
-template void ctmfHelper_avx2<uint16_t, 128>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
-template void ctmfHelper_avx2<uint16_t, 256>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_avx512<uint8_t, 16>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_avx512<uint16_t, 32>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_avx512<uint16_t, 64>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_avx512<uint16_t, 128>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
+template void ctmfHelper_avx512<uint16_t, 256>(const void * srcp, void * dstp, const CTMFData * const VS_RESTRICT d, const int width, const int height, const int stride, const bool padLeft, const bool padRight) noexcept;
 #endif

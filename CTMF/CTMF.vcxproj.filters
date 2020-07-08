@@ -24,12 +24,15 @@
     <ClCompile Include="CTMF_AVX2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="vectorclass\instrset_detect.cpp">
+    <ClCompile Include="CTMF_AVX512.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="VCL2\instrset_detect.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="CTMF.hpp">
+    <ClInclude Include="CTMF.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
